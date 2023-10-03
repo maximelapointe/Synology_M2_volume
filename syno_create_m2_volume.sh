@@ -105,60 +105,7 @@ Error='\e[41m'      # ${Error}
 Off='\e[0m'         # ${Off}
 
 
-createpartition(){
-    if [[ $1 ]]; then
-        echo -e "\nCreating Synology partitions on $1" >&2
-        if ! synopartition --part /dev/"$1" "$synopartindex"; then
-            echo -e "\n${Error}ERROR 5${Off} Failed to create syno partitions!" >&2
-            exit 1
-        fi
-    fi
-}
 
-
-selectdisk(){
-    if [[ ${#m2list[@]} -gt "0" ]]; then
-        select nvmes in "${m2list[@]}" "Done"; do
-            case "$nvmes" in
-                Done)
-                    Done="yes"
-                    selected_disk=""
-                    break
-                    ;;
-                Quit)
-                    exit
-                    ;;
-                nvme*)
-                    #if [[ " ${m2list[*]} "  =~ " ${nvmes} " ]]; then
-                        selected_disk="$nvmes"
-                        break
-                    #else
-                    #    echo -e "${Red}Invalid answer!${Off} Try again." >&2
-                    #    selected_disk=""
-                    #fi
-                    ;;
-                *)
-                    echo -e "${Red}Invalid answer!${Off} Try again." >&2
-                    selected_disk=""
-                    ;;
-            esac
-        done
-
-        if [[ $Done != "yes" ]] && [[ $selected_disk ]]; then
-            mdisk+=("$selected_disk")
-            # Remove selected drive from list of selectable drives
-            remelement "$selected_disk"
-            # Keep track of many drives user selected
-            selected="$((selected +1))"
-            echo -e "You selected ${Cyan}$selected_disk${Off}" >&2
-
-            #echo "Drives selected: $selected" >&2  # debug
-        fi
-        echo
-    else
-        Done="yes"
-    fi
-}
 
 #================== Begin script ==================
 
@@ -299,6 +246,50 @@ remelement(){
     fi
 }
 
+selectdisk(){
+    if [[ ${#m2list[@]} -gt "0" ]]; then
+        select nvmes in "${m2list[@]}" "Done"; do
+            case "$nvmes" in
+                Done)
+                    Done="yes"
+                    selected_disk=""
+                    break
+                    ;;
+                Quit)
+                    exit
+                    ;;
+                nvme*)
+                    #if [[ " ${m2list[*]} "  =~ " ${nvmes} " ]]; then
+                        selected_disk="$nvmes"
+                        break
+                    #else
+                    #    echo -e "${Red}Invalid answer!${Off} Try again." >&2
+                    #    selected_disk=""
+                    #fi
+                    ;;
+                *)
+                    echo -e "${Red}Invalid answer!${Off} Try again." >&2
+                    selected_disk=""
+                    ;;
+            esac
+        done
+
+        if [[ $Done != "yes" ]] && [[ $selected_disk ]]; then
+            mdisk+=("$selected_disk")
+            # Remove selected drive from list of selectable drives
+            remelement "$selected_disk"
+            # Keep track of many drives user selected
+            selected="$((selected +1))"
+            echo -e "You selected ${Cyan}$selected_disk${Off}" >&2
+
+            #echo "Drives selected: $selected" >&2  # debug
+        fi
+        echo
+    else
+        Done="yes"
+    fi
+}
+
 mdisk=(  )
 
 # Set maxdisk to the number of M.2 drives found if not Single or RAID 1
@@ -358,6 +349,16 @@ fi
 
 #--------------------------------------------------------------------
 # Create Synology partitions on selected M.2 drives
+
+createpartition(){
+    if [[ $1 ]]; then
+        echo -e "\nCreating Synology partitions on $1" >&2
+        if ! synopartition --part /dev/"$1" "$synopartindex"; then
+            echo -e "\n${Error}ERROR 5${Off} Failed to create syno partitions!" >&2
+            exit 1
+        fi
+    fi
+}
 
 synopartindex=13  # Syno partition index for NVMe drives can be 12 or 13 or ?
 
