@@ -2,9 +2,8 @@
 #-----------------------------------------------------------------------------------
 # Create volume on M.2 drive(s) on Synology models that don't have a GUI option
 #
-# Github: https://github.com/007revad/Synology_M2_volume
-# Script verified at https://www.shellcheck.net/
-# Tested on DSM 7.2 beta
+# Github: https://github.com/maximelapointe/Synology_M2_volume
+# Tested on DSM DSM 7.2-64570 Update 3
 #
 # To run in a shell (replace /volume1/scripts/ with path to script):
 # sudo /volume1/scripts/create_m2_volume.sh
@@ -17,35 +16,13 @@
 # https://easylinuxtipsproject.blogspot.com/p/ssd.html#ID16.2
 #-----------------------------------------------------------------------------------
 
-
-# TODO
-# Better detection if DSM is using the drive.
-# Show drive names the same as DSM does.
-# Support SATA M.2 drives.
-# Maybe add logging.
-# Add option to repair damaged array? DSM can probably handle this.
-
-# DONE
-# Added support for RAID 6 and RAID 10 (thanks Raj)
-# Added support for an unlimited number of M.2 drives for RAID 0, 5, 6 and 10.
-#  https://kb.synology.com/en-in/DSM/tutorial/What_is_RAID_Group
-# Now shows how long the resync took.
-# The script now automatically reloads after updating itself.
-#
-# Added DSM 6 support (WIP)
-#
 # Added support for RAID 5
 # Changed to not include the 1st selected drive in the choices for 2nd drive etc.
-#
-# Fixed "download new version" failing if script was run via symlink or ./<scriptname>
 #
 # Check for errors from synopartition, mdadm, pvcreate and vgcreate 
 #   so the script doesn't continue and appear to have succeeded.
 #
 # Changed "pvcreate" to "pvcreate -ff" to avoid issues.
-#
-# Changed latest version check to download to /tmp and extract files to the script's location,
-# replacing the existing .sh and readme.txt files.
 #
 # Added single progress bar for the resync progress.
 #
@@ -57,16 +34,10 @@
 #
 # Added -s, --steps option to show required steps after running script.
 #
-# Show DSM version and NAS model (to make it easier to debug)
 # Changed for DSM 7.2 and older DSM version:
 # - For DSM 7.x
 #   - Ensures m2 volume support is enabled.
 #   - Creates RAID and storage pool only.
-# - For DSM 6.2.4 and earlier
-#   - Creates RAID, storage pool and volume.
-#
-#
-# Allow specifying the size of the volume to leave unused space for drive wear management.
 #
 # Instead of creating the filesystem directly on the mdraid device, you can use LVM to create a PV on it,
 # and a VG, and then use the UI to create volume(s), making it more "standard" to what DSM would do.
@@ -77,16 +48,40 @@
 # Logical Volume (LV): VG's are divided into LV's and are mounted as partitions.
 
 
-scriptver="v1.3.15"
-script=Synology_M2_volume
-repo="007revad/Synology_M2_volume"
+
+
+#================== Prechecks and gathering variables ==================
+
+#--------------------------------------------------------------------
+# User defined variables
+raid="RAID 1"
+
+#================== Gathering Variables ==================
+# Get DSM major and minor versions
+dsm=$(get_key_value /etc.defaults/VERSION majorversion)
+dsminor=$(get_key_value /etc.defaults/VERSION minorversion)
+
+# Get NAS model
+model=$(cat /proc/sys/kernel/syno_hw_version)
 
 # Check BASH variable is bash
 if [ ! "$(basename "$BASH")" = bash ]; then
     echo "This is a bash script. Do not run it with $(basename "$BASH")"
-    printf \\a
     exit 1
 fi
+
+# Check script is running as root
+if [[ $( whoami ) != "root" ]]; then
+    echo -e "${Error}ERROR${Off} This script must be run as sudo or root!"
+    exit 1
+fi
+
+# Check DSM 7 or higher
+if [[ ! $dsm -gt "6" ]]; then
+    echo -e "${Error}ERROR${Off} This script only works with DSM 7 or higher!"
+    exit 1
+fi
+
 
 #echo -e "bash version: $(bash --version | head -1 | cut -d' ' -f4)\n"  # debug
 
@@ -102,13 +97,10 @@ Cyan='\e[0;36m'     # ${Cyan}
 Error='\e[41m'      # ${Error}
 Off='\e[0m'         # ${Off}
 
-ding(){
-    printf \\a
-}
+
 
 usage(){
     cat <<EOF
-$script $scriptver - by 007revad
 
 Usage: $(basename "$0") [options]
 
@@ -123,26 +115,14 @@ EOF
 }
 
 
-scriptversion(){
-    cat <<EOF
-$script $scriptver - by 007revad
-
-See https://github.com/$repo
-EOF
-    exit 0
-}
 
 
 createpartition(){
     if [[ $1 ]]; then
         echo -e "\nCreating Synology partitions on $1" >&2
-        if [[ $dryrun == "yes" ]]; then
-            echo "synopartition --part /dev/$1 $synopartindex" >&2  # dryrun
-        else
-            if ! synopartition --part /dev/"$1" "$synopartindex"; then
-                echo -e "\n${Error}ERROR 5${Off} Failed to create syno partitions!" >&2
-                exit 1
-            fi
+        if ! synopartition --part /dev/"$1" "$synopartindex"; then
+            echo -e "\n${Error}ERROR 5${Off} Failed to create syno partitions!" >&2
+            exit 1
         fi
     fi
 }
@@ -218,39 +198,32 @@ EOF
 }
 
 
-# Save options used
-args=("$@")
+#================== Begin script ==================
 
 
+
+
+#================== Inferring Settings ==================
+if [[ $dsm -gt "6" ]] && [[ $dsminor -gt "1" ]]; then
+    dsm72="yes"
+fi
+if [[ $dsm -gt "6" ]] && [[ $dsminor -gt "0" ]]; then
+    dsm71="yes"
+fi
+
+
+================== TO DELETE AFTER CLEANING (/start) ==================
 # Check for flags with getopt
-# shellcheck disable=SC2034
-if options="$(getopt -o abcdefghijklmnopqrstuvwxyz0123456789 -a \
-    -l all,steps,help,version,log,debug -- "$@")"; then
+if options="$(getopt -o abcdefghijklmnopqrstuvwxyz0123456789 -a -l all,steps,help -- "$@")"; then
     eval set -- "$options"
     while true; do
         case "${1,,}" in
-            -a|--all)           # List all M.2 drives even if detected as active
-                all=yes
-                ;;
             -s|--steps)         # Show steps remaining after running script
                 showsteps
                 exit
                 ;;
             -h|--help)          # Show usage options
                 usage
-                ;;
-            -v|--version)       # Show script version
-                scriptversion
-                ;;
-            -l|--log)            # Log
-                log=yes
-                ;;
-            -d|--debug)          # Show and log debug info
-                debug=yes
-                ;;
-            -r)                  # Simulate 4 NVMe drives for dry run testing
-                raid5=yes
-                dryrun=yes
                 ;;
             --)
                 shift
@@ -268,236 +241,42 @@ else
     usage
 fi
 
-
-if [[ $debug == "yes" ]]; then
-    # set -x
-    export PS4='`[[ $? == 0 ]] || echo "\e[1;31;40m($?)\e[m\n "`:.$LINENO:'
-fi
+================== TO DELETE AFTER CLEANING (/end) ==================
 
 
-# Check script is running as root
-if [[ $( whoami ) != "root" ]]; then
-    ding
-    echo -e "${Error}ERROR${Off} This script must be run as sudo or root!"
-    exit 1
-fi
 
-# Show script version
-#echo -e "$script $scriptver\ngithub.com/$repo\n"
-echo "$script $scriptver"
-
-# Get DSM major and minor versions
-dsm=$(get_key_value /etc.defaults/VERSION majorversion)
-dsminor=$(get_key_value /etc.defaults/VERSION minorversion)
-# shellcheck disable=SC2034
-if [[ $dsm -gt "6" ]] && [[ $dsminor -gt "1" ]]; then
-    dsm72="yes"
-fi
-if [[ $dsm -gt "6" ]] && [[ $dsminor -gt "0" ]]; then
-    dsm71="yes"
-fi
-
-# Get NAS model
-model=$(cat /proc/sys/kernel/syno_hw_version)
-
-# Get DSM full version
-productversion=$(get_key_value /etc.defaults/VERSION productversion)
-buildphase=$(get_key_value /etc.defaults/VERSION buildphase)
-buildnumber=$(get_key_value /etc.defaults/VERSION buildnumber)
-smallfixnumber=$(get_key_value /etc.defaults/VERSION smallfixnumber)
-
-# Show DSM full version and model
-if [[ $buildphase == GM ]]; then buildphase=""; fi
-if [[ $smallfixnumber -gt "0" ]]; then smallfix="-$smallfixnumber"; fi
-echo -e "$model DSM $productversion-$buildnumber$smallfix $buildphase\n"
-
-# Show options used
-echo "Using options: ${args[*]}"
-
-
-echo -e "Type ${Cyan}yes${Off} to continue."\
-    "Type anything else to do a ${Cyan}dry run test${Off}."
+#--------------------------------------------------------------------
+# Put a pause in case of regrets
+echo -e "Type ${Cyan}anything${Off} to continue."
 read -r answer
-if [[ ${answer,,} != "yes" ]]; then dryrun="yes"; fi
-if [[ $dryrun == "yes" ]]; then
-    echo -e "*** Doing a dry run test ***\n"
-    sleep 1  # Make sure they see they're running a dry run test
-else
-    echo
-fi
-
-
-#------------------------------------------------------------------------------
-# Check latest release with GitHub API
-
-get_latest_release() {
-    # Curl timeout options:
-    # https://unix.stackexchange.com/questions/94604/does-curl-have-a-timeout
-    curl --silent -m 10 --connect-timeout 5 \
-        "https://api.github.com/repos/$1/releases/latest" |
-    grep '"tag_name":' |          # Get tag line
-    sed -E 's/.*"([^"]+)".*/\1/'  # Pluck JSON value
-}
-
-tag=$(get_latest_release "$repo")
-shorttag="${tag:1}"
-#scriptpath=$(dirname -- "$0")
-
-# Get script location
-# https://stackoverflow.com/questions/59895/
-source=${BASH_SOURCE[0]}
-while [ -L "$source" ]; do # Resolve $source until the file is no longer a symlink
-    scriptpath=$( cd -P "$( dirname "$source" )" >/dev/null 2>&1 && pwd )
-    source=$(readlink "$source")
-    # If $source was a relative symlink, we need to resolve it
-    # relative to the path where the symlink file was located
-    [[ $source != /* ]] && source=$scriptpath/$source
-done
-scriptpath=$( cd -P "$( dirname "$source" )" >/dev/null 2>&1 && pwd )
-#echo "Script location: $scriptpath"  # debug
-
-
-# shellcheck disable=SC2034
-if ! printf "%s\n%s\n" "$tag" "$scriptver" |
-        sort --check=quiet --version-sort &> /dev/null ; then
-    echo -e "${Cyan}There is a newer version of this script available.${Off}"
-    echo -e "Current version: ${scriptver}\nLatest version:  $tag"
-    if [[ -f $scriptpath/$script-$shorttag.tar.gz ]]; then
-        # They have the latest version tar.gz downloaded but are using older version
-        echo "https://github.com/$repo/releases/latest"
-        sleep 10
-    elif [[ -d $scriptpath/$script-$shorttag ]]; then
-        # They have the latest version extracted but are using older version
-        echo "https://github.com/$repo/releases/latest"
-        sleep 10
-    else
-        echo -e "${Cyan}Do you want to download $tag now?${Off} [y/n]"
-        read -r -t 30 reply
-        if [[ ${reply,,} == "y" ]]; then
-            if cd /tmp; then
-                url="https://github.com/$repo/archive/refs/tags/$tag.tar.gz"
-                if ! curl -LJO -m 30 --connect-timeout 5 "$url";
-                then
-                    echo -e "${Error}ERROR ${Off} Failed to download"\
-                        "$script-$shorttag.tar.gz!"
-                else
-                    if [[ -f /tmp/$script-$shorttag.tar.gz ]]; then
-                        # Extract tar file to /tmp/<script-name>
-                        if ! tar -xf "/tmp/$script-$shorttag.tar.gz" -C "/tmp"; then
-                            echo -e "${Error}ERROR ${Off} Failed to"\
-                                "extract $script-$shorttag.tar.gz!"
-                        else
-                            # Copy new script sh files to script location
-                            if ! cp -p "/tmp/$script-$shorttag/"*.sh "$scriptpath"; then
-                                copyerr=1
-                                echo -e "${Error}ERROR ${Off} Failed to copy"\
-                                    "$script-$shorttag .sh file(s) to:\n $scriptpath"
-                            else
-                                # Set permsissions on CHANGES.txt
-                                if ! chmod 744 "$scriptpath/"*.sh ; then
-                                    permerr=1
-                                    echo -e "${Error}ERROR ${Off} Failed to set permissions on:"
-                                    echo "$scriptpath *.sh file(s)"
-                                fi
-                            fi
-
-                            # Copy new CHANGES.txt file to script location
-                            if ! cp -p "/tmp/$script-$shorttag/CHANGES.txt" "$scriptpath"; then
-                                copyerr=1
-                                echo -e "${Error}ERROR ${Off} Failed to copy"\
-                                    "$script-$shorttag/CHANGES.txt to:\n $scriptpath"
-                            else
-                                # Set permsissions on CHANGES.txt
-                                if ! chmod 744 "$scriptpath/CHANGES.txt"; then
-                                    permerr=1
-                                    echo -e "${Error}ERROR ${Off} Failed to set permissions on:"
-                                    echo "$scriptpath/CHANGES.txt"
-                                fi
-                            fi
-
-                            # Delete downloaded .tar.gz file
-                            if ! rm "/tmp/$script-$shorttag.tar.gz"; then
-                                delerr=1
-                                echo -e "${Error}ERROR ${Off} Failed to delete"\
-                                    "downloaded /tmp/$script-$shorttag.tar.gz!"
-                            fi
-
-                            # Delete extracted tmp files
-                            if ! rm -r "/tmp/$script-$shorttag"; then
-                                delerr=1
-                                echo -e "${Error}ERROR ${Off} Failed to delete"\
-                                    "downloaded /tmp/$script-$shorttag!"
-                            fi
-
-                            # Notify of success (if there were no errors)
-                            if [[ $copyerr != 1 ]] && [[ $permerr != 1 ]]; then
-                                echo -e "\n$tag and changes.txt downloaded to:"\
-                                    "$scriptpath"
-                                #echo -e "${Cyan}Do you want to stop this script"\
-                                #    "so you can run the new one?${Off} [y/n]"
-                                #read -r reply
-                                #if [[ ${reply,,} == "y" ]]; then exit; fi
-
-                                # Reload script
-                                printf -- '-%.0s' {1..79}; echo  # print 79 -
-                                exec "$0" "${args[@]}"
-                            fi
-                        fi
-                    else
-                        echo -e "${Error}ERROR ${Off}"\
-                            "/tmp/$script-$shorttag.tar.gz not found!"
-                        #ls /tmp | grep "$script"  # debug
-                    fi
-                fi
-            else
-                echo -e "${Error}ERROR ${Off} Failed to cd to /tmp!"
-            fi
-        fi
-    fi
-fi
+echo
 
 
 #--------------------------------------------------------------------
 # Check there's no active resync
 
 if grep resync /proc/mdstat >/dev/null ; then
-    ding
     echo "The Synology is currently doing a RAID resync or data scrub!"
     exit
 fi
 
 
 #--------------------------------------------------------------------
-# Get list of M.2 drives
+# Get list of all M.2 drives
 
-getm2info() {
+getallm2info() {
     nvmemodel=$(cat "$1/device/model")
     nvmemodel=$(printf "%s" "$nvmemodel" | xargs)  # trim leading/trailing space
     echo "$2 M.2 $(basename -- "${1}") is $nvmemodel" >&2
+
     dev="$(basename -- "${1}")"
-
-    #echo "/dev/${dev}" >&2  # debug
-
-    if [[ $all != "yes" ]]; then
-        # Skip listing M.2 drives detected as active
-        if grep -E "active.*${dev}" /proc/mdstat >/dev/null ; then
-            echo -e "${Cyan}Skipping drive as it is being used by DSM${Off}" >&2
-            echo "" >&2
-            #active="yes"
-            return
-        fi
-    fi
-
-    if [[ -e /dev/${dev}p1 ]] && [[ -e /dev/${dev}p2 ]] &&\
-            [[ -e /dev/${dev}p3 ]]; then
+    if [[ -e /dev/${dev}p1 ]] && [[ -e /dev/${dev}p2 ]] && [[ -e /dev/${dev}p3 ]]; then
         echo -e "${Cyan}WARNING Drive has a volume partition${Off}" >&2
         haspartitons="yes"
-    elif [[ ! -e /dev/${dev}p3 ]] && [[ ! -e /dev/${dev}p2 ]] &&\
-            [[ -e /dev/${dev}p1 ]]; then
+    elif [[ ! -e /dev/${dev}p3 ]] && [[ ! -e /dev/${dev}p2 ]] && [[ -e /dev/${dev}p1 ]]; then
         echo -e "${Cyan}WARNING Drive has a cache partition${Off}" >&2
         haspartitons="yes"
-    elif [[ ! -e /dev/${dev}p3 ]] && [[ ! -e /dev/${dev}p2 ]] &&\
-            [[ ! -e /dev/${dev}p1 ]]; then
+    elif [[ ! -e /dev/${dev}p3 ]] && [[ ! -e /dev/${dev}p2 ]] && [[ ! -e /dev/${dev}p1 ]]; then
         echo "No existing partitions on drive" >&2
     fi
     m2list+=("${dev}")
@@ -508,40 +287,33 @@ for d in /sys/block/*; do
     case "$(basename -- "${d}")" in
         nvme*)  # M.2 NVMe drives
             if [[ $d =~ nvme[0-9][0-9]?n[0-9][0-9]?$ ]]; then
-                getm2info "$d" "NVMe"
+                getallm2info "$d" "NVMe"
             fi
         ;;
         nvc*)  # M.2 SATA drives (in PCIe card only?)
             if [[ $d =~ nvc[0-9][0-9]?$ ]]; then
-                getm2info "$d" "SATA"
+                getallm2info "$d" "SATA"
             fi
         ;;
         *)
-          ;;
+        ;;
     esac
 done
 
-#echo -e "Inactive M.2 drives found: ${#m2list[@]}\n"
-echo -e "Unused M.2 drives found: ${#m2list[@]}\n"
-
-#echo -e "NVMe list: ${m2list[@]}\n"  # debug
-#echo -e "NVMe qty: ${#m2list[@]}\n"  # debug
-
-if [[ ${#m2list[@]} == "0" ]]; then exit; fi
-
+echo -e "NVMe list: ${m2list[@]}\n"
+echo -e "NVMe qty: ${#m2list[@]}\n"
 
 #--------------------------------------------------------------------
-# Select RAID type (if multiple M.2 drives found)
+# Set storage pool mode (Single or RAID if multiple M.2 drives found)
 
-if [[ ${#m2list[@]} -gt "1" ]]; then
-    PS3="Select the RAID type: "
-    if [[ ${#m2list[@]} -eq "2" ]]; then
-        options=("Single" "RAID 0" "RAID 1")
-    elif [[ ${#m2list[@]} -gt "2" ]]; then
-        options=("Single" "RAID 0" "RAID 1" "RAID 5" "RAID 6" "RAID 10")
-    fi
-    select raid in "${options[@]}"; do
-      case "$raid" in
+if [[ ${#m2list[@]} == "0" ]]; then
+    echo "No NVME drive"
+    exit
+elif [[ ${#m2list[@]} -eq "1" ]]; then
+    raidtype="1"
+    single="yes"
+elif [[ ${#m2list[@]} -gt "1" ]]; then
+    case "$raid" in
         "Single")
             raidtype="1"
             single="yes"
@@ -554,49 +326,19 @@ if [[ ${#m2list[@]} -gt "1" ]]; then
             mindisk=2
             #maxdisk=24
             break
-            ;;
+        ;;
         "RAID 1")
             raidtype="1"
             mindisk=2
-            #maxdisk=4
+            #maxdisk="${#m2list[@]}"
             break
-            ;;
-        "RAID 5")
-            raidtype="5"
-            mindisk=3
-            #maxdisk=24
-            break
-            ;;
-        "RAID 6")
-            raidtype="6"
-            mindisk=4
-            #maxdisk=24
-            break
-            ;;
-        "RAID 10")
-            raidtype="10"
-            mindisk=4
-            #maxdisk=24
-            break
-            ;;
-        Quit)
-            exit
-            ;;
+        ;;
         *)
-            echo -e "${Red}Invalid answer!${Off} Try again."
-            ;;
-      esac
-    done
-    if [[ $single == "yes" ]]; then
-        echo -e "You selected ${Cyan}Single${Off}"
-    else
-        echo -e "You selected ${Cyan}RAID $raidtype${Off}"
-    fi
-    echo
-elif [[ ${#m2list[@]} -eq "1" ]]; then
-    raidtype="1"
-    single="yes"
+            echo -e "${Red}Invalid raid value!${Off} Try again."
+        ;;
+    esac
 fi
+
 
 if [[ $single == "yes" ]]; then
     maxdisk=1
@@ -610,7 +352,7 @@ fi
 
 
 #--------------------------------------------------------------------
-# Selected M.2 drive functions
+# Select M.2 drives
 
 getindex(){
     # Get array index from value
@@ -621,7 +363,6 @@ getindex(){
     done
     return "$r"
 }
-
 
 remelement(){
     # Remove selected drive from list of other selectable drives
@@ -643,10 +384,6 @@ remelement(){
         done
     fi
 }
-
-
-#--------------------------------------------------------------------
-# Select M.2 drives
 
 mdisk=(  )
 
@@ -674,61 +411,23 @@ if [[ $selected -lt "$mindisk" ]]; then
     exit
 fi
 
-
 #--------------------------------------------------------------------
-# Select file system - only DSM 6.2.4 and lower
+# Confirm choices
 
-if [[ $dsm == "6" ]]; then
-    PS3="Select the file system: "
-    select filesys in "btrfs" "ext4"; do
-        case "$filesys" in
-            btrfs)
-                echo -e "You selected ${Cyan}btrfs${Off}"  # debug
-                format="btrfs"
-                break
-                ;;
-            ext4)
-                echo -e "You selected ${Cyan}ext4${Off}"  # debug
-                format="ext4"
-                break
-                ;;
-            *)
-                echo -e "${Red}Invalid answer${Off}! Try again."
-                ;;
-        esac
-    done
-    #echo
-fi
-
-
-#--------------------------------------------------------------------
-# Let user confirm their choices
-
-if [[ $format == "btrfs" ]] || [[ $format == "ext4" ]]; then
-    formatshow="$format "
-fi
-
-echo -en "Ready to create ${Cyan}${formatshow}RAID $raidtype${Off} volume group using "
+echo -en "Ready to create ${Cyan}RAID $raidtype${Off} volume group using "
 echo -e "${Cyan}${mdisk[*]}${Off}"
 
 if [[ $haspartitons == "yes" ]]; then
     echo -e "\n${Red}WARNING${Off} Everything on the selected"\
         "M.2 drive(s) will be deleted."
 fi
-if [[ $dryrun == "yes" ]]; then
-    echo -e "        *** Not really because we're doing"\
-        "a ${Cyan}dry run${Off} ***"
-fi
 
 echo -e "Type ${Cyan}yes${Off} to continue. Type anything else to quit."
 read -r answer
 if [[ ${answer,,} != "yes" ]]; then exit; fi
 
-
-# Abandon hope, all ye who enter here :)
-echo -e "You chose to continue. You are brave! :)\n"
+echo -e "Confirmed\n"
 sleep 1
-
 
 #--------------------------------------------------------------------
 # Get highest md# mdraid device
@@ -737,22 +436,16 @@ sleep 1
 lastmd=$(grep -oP "md[0-9]{1,2}" "/proc/mdstat" | sort | tail -1)
 nextmd=$((${lastmd:2} +1))
 if [[ -z $nextmd ]]; then
-    ding
     echo -e "${Error}ERROR${Off} Next md number not found!"
     exit 1
 else
     echo "Using md$nextmd as it's the next available."
 fi
 
-
 #--------------------------------------------------------------------
 # Create Synology partitions on selected M.2 drives
 
-if [[ $dsm == "7" ]]; then
-    synopartindex=13  # Syno partition index for NVMe drives can be 12 or 13 or ?
-else
-    synopartindex=12  # Syno partition index for NVMe drives can be 12 or 13 or ?
-fi
+synopartindex=13  # Syno partition index for NVMe drives can be 12 or 13 or ?
 
 partargs=(  )
 for i in "${mdisk[@]}"
@@ -768,42 +461,25 @@ done
 #--------------------------------------------------------------------
 # Create the RAID array
 # --level=0 for RAID 0  --level=1 for RAID 1  --level=5 for RAID 5
-
-#if [[ $raidtype ]]; then
-
 SECONDS=0  # To work out how long the resync took
 
 echo -e "\nCreating the RAID array. This will take a while..."
-if [[ $dryrun == "yes" ]]; then
-    echo "mdadm --create /dev/md${nextmd} --level=${raidtype} --raid-devices=$selected"\
-        --force "${partargs[@]}"                # dryrun
-else
-    if ! mdadm --create /dev/md"${nextmd}" --level="${raidtype}" --raid-devices="$selected"\
-        --force "${partargs[@]}"; then
-            ding
-        echo -e "\n${Error}ERROR 5${Off} Failed to create RAID!"
-        exit 1
-    fi
+
+if ! mdadm --create /dev/md"${nextmd}" --level="${raidtype}" --raid-devices="$selected" --force "${partargs[@]}"; then
+    echo -e "\n${Error}ERROR 5${Off} Failed to create RAID!"
+    exit 1
 fi
 
 # Show resync progress every 5 seconds
-if [[ $dryrun == "yes" ]]; then
-    echo -ne "      [====>................]  resync = 20%\r"; sleep 1  # dryrun
-    echo -ne "      [========>............]  resync = 40%\r"; sleep 1  # dryrun
-    echo -ne "      [============>........]  resync = 60%\r"; sleep 1  # dryrun
-    echo -ne "      [================>....]  resync = 80%\r"; sleep 1  # dryrun
-    echo -ne "      [====================>]  resync = 100%\r\n"        # dryrun
-else
-    while grep resync /proc/mdstat >/dev/null; do
-        # Only multi-drive RAID gets re-synced
-        progress="$(grep -E -A 2 active.*nvme /proc/mdstat | grep resync | cut -d\( -f1 )"
-        echo -ne "$progress\r"
-        sleep 5
-    done
-    # Show 100% progress
-    if [[ $progress ]]; then
-        echo -ne "      [====================>]  resync = 100%\r"
-    fi
+while grep resync /proc/mdstat >/dev/null; do
+    # Only multi-drive RAID gets re-synced
+    progress="$(grep -E -A 2 active.*nvme /proc/mdstat | grep resync | cut -d\( -f1 )"
+    echo -ne "$progress\r"
+    sleep 5
+done
+# Show 100% progress
+if [[ $progress ]]; then
+    echo -ne "      [====================>]  resync = 100%\r"
 fi
 
 # Show how long the resync took
@@ -818,65 +494,20 @@ fi
 
 
 #--------------------------------------------------------------------
-# Create Physical Volume and Volume Group with LVM - DSM 7 only
+# Create Physical Volume and Volume Group with LVM
 
 # Create a physical volume (PV) on the partition
-if [[ $dsm -gt "6" ]]; then
-    echo -e "\nCreating a physical volume (PV) on md$nextmd partition"
-    if [[ $dryrun == "yes" ]]; then
-        echo "pvcreate -ff /dev/md$nextmd"                              # dryrun
-    else
-        if ! pvcreate -ff /dev/md$nextmd ; then
-            ding
-            echo -e "\n${Error}ERROR 5${Off} Failed to create physical volume!"
-            exit 1
-        fi
-    fi
+echo -e "\nCreating a physical volume (PV) on md$nextmd partition"
+if ! pvcreate -ff /dev/md$nextmd ; then
+    echo -e "\n${Error}ERROR 5${Off} Failed to create physical volume!"
+    exit 1
 fi
 
 # Create a volume group (VG)
-if [[ $dsm -gt "6" ]]; then
-    echo -e "\nCreating a volume group (VG) on md$nextmd partition"
-    if [[ $dryrun == "yes" ]]; then
-        echo "vgcreate vg$nextmd /dev/md$nextmd"                        # dryrun
-    else
-        if ! vgcreate vg$nextmd /dev/md$nextmd ; then
-            ding
-            echo -e "\n${Error}ERROR 5${Off} Failed to create volume group!"
-            exit 1
-        fi
-    fi
-fi
-
-
-#--------------------------------------------------------------------
-# Format array - only DSM 6.2.4 and lower
-
-if [[ $dsm == "6" ]]; then
-    if [[ $format == "btrfs" ]]; then
-        if [[ $dryrun == "yes" ]]; then
-            echo "echo 0 > /sys/block/md${nextmd}/queue/rotational"  # dryrun
-            echo "mkfs.btrfs -f /dev/md${nextmd}"                    # dryrun
-        else
-            # Ensure mkfs.btrfs sees raid as SSD and optimises file system for SSD
-            echo 0 > /sys/block/md${nextmd}/queue/rotational
-            # Format nvme#np2
-            mkfs.btrfs -f /dev/md${nextmd}
-        fi
-    elif [[ $format == "ext4" ]]; then
-        if [[ $dryrun == "yes" ]]; then
-            echo "echo 0 > /sys/block/md${nextmd}/queue/rotational"  # dryrun
-            echo "mkfs.ext4 -f /dev/md${nextmd}"                     # dryrun
-        else
-            # Ensure mkfs.ext4 sees raid as SSD and optimises file system for SSD
-            echo 0 > /sys/block/md${nextmd}/queue/rotational  # Is this valid for mkfs.ext4 ?
-            # Format nvme#np2
-            mkfs.ext4 -F /dev/md${nextmd}
-        fi
-    else
-        ding
-        echo "What file system did you select!?"; exit
-    fi
+echo -e "\nCreating a volume group (VG) on md$nextmd partition"
+if ! vgcreate vg$nextmd /dev/md$nextmd ; then
+    echo -e "\n${Error}ERROR 5${Off} Failed to create volume group!"
+    exit 1
 fi
 
 
@@ -891,7 +522,6 @@ if [[ $dsm71 == "yes" ]]; then
         if cp "$synoinfo" "$synoinfo.bak"; then
             echo -e "\nBacked up $(basename -- "$synoinfo")" >&2
         else
-            ding
             echo -e "\n${Error}ERROR 5${Off} Failed to backup $(basename -- "$synoinfo")!"
             exit 1
         fi
@@ -929,29 +559,14 @@ if [[ $dsm71 == "yes" ]]; then
 fi
 
 
-#--------------------------------------------------------------------
-# Notify of remaining steps
-
-echo
-showsteps  # Show the final steps to do in DSM
-
 
 #--------------------------------------------------------------------
-# Reboot
+# Reboot and quit+
+#--------------------------------------------------------------------
+#
+echo "Rebooting"
+reboot
 
-echo -e "\n${Cyan}Online assemble option may not appear in storage manager \
-    until you reboot.${Off}"
-echo -e "Type ${Cyan}yes${Off} to reboot now."
-echo -e "Type anything else to quit (if you will reboot it yourself)."
+echo -e "Type anything to quit"
 read -r answer
-if [[ ${answer,,} != "yes" ]]; then exit; fi
-if [[ $dryrun == "yes" ]]; then
-    echo "reboot"  # dryrun
-else
-    # Reboot in the background so user can see DSM's "going down" message
-    reboot &
-fi
-
-
-#exit  # Don't exit so user can see DSM's "going down" message
-
+exit
