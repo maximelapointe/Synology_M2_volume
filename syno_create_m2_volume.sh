@@ -82,6 +82,13 @@ if [[ ! $dsm -gt "6" ]]; then
     exit 1
 fi
 
+if [[ $dsm -gt "6" ]] && [[ $dsminor -gt "1" ]]; then
+    dsm72="yes"
+fi
+if [[ $dsm -gt "6" ]] && [[ $dsminor -gt "0" ]]; then
+    dsm71="yes"
+fi
+
 
 #echo -e "bash version: $(bash --version | head -1 | cut -d' ' -f4)\n"  # debug
 
@@ -96,25 +103,6 @@ Cyan='\e[0;36m'     # ${Cyan}
 #White='\e[0;37m'   # ${White}
 Error='\e[41m'      # ${Error}
 Off='\e[0m'         # ${Off}
-
-
-
-usage(){
-    cat <<EOF
-
-Usage: $(basename "$0") [options]
-
-Options:
-  -a, --all        List all M.2 drives even if detected as active
-  -s, --steps      Show the steps to do after running this script
-  -h, --help       Show this help message
-  -v, --version    Show the script version
-
-EOF
-    exit 0
-}
-
-
 
 
 createpartition(){
@@ -172,78 +160,7 @@ selectdisk(){
     fi
 }
 
-
-showsteps(){
-    echo -e "\n${Cyan}Steps you need to do after running this script:${Off}" >&2
-    major=$(get_key_value /etc.defaults/VERSION major)
-    if [[ $major -gt "6" ]]; then
-        cat <<EOF
-  1. After the restart go to Storage Manager and select online assemble:
-       Storage Pool > Available Pool > Online Assemble
-  2. Create the volume as you normally would:
-       Select the new Storage Pool > Create > Create Volume
-  3. Optionally enable TRIM:
-       Storage Pool > ... > Settings > SSD TRIM
-EOF
-    echo -e "     ${Cyan}SSD TRIM option is only available in DSM 7.2 Beta for RAID 1${Off}" >&2
-    echo -e "\n${Error}Important${Off}" >&2
-    cat <<EOF
-If you later upgrade DSM and your M.2 drives are shown as unsupported
-and the storage pool is shown as missing, and online assemble fails,
-you should run the Synology HDD db script:
-EOF
-    echo -e "${Cyan}https://github.com/007revad/Synology_HDD_db${Off}\n" >&2
-    fi
-    #return
-}
-
-
 #================== Begin script ==================
-
-
-
-
-#================== Inferring Settings ==================
-if [[ $dsm -gt "6" ]] && [[ $dsminor -gt "1" ]]; then
-    dsm72="yes"
-fi
-if [[ $dsm -gt "6" ]] && [[ $dsminor -gt "0" ]]; then
-    dsm71="yes"
-fi
-
-
-================== TO DELETE AFTER CLEANING (/start) ==================
-# Check for flags with getopt
-if options="$(getopt -o abcdefghijklmnopqrstuvwxyz0123456789 -a -l all,steps,help -- "$@")"; then
-    eval set -- "$options"
-    while true; do
-        case "${1,,}" in
-            -s|--steps)         # Show steps remaining after running script
-                showsteps
-                exit
-                ;;
-            -h|--help)          # Show usage options
-                usage
-                ;;
-            --)
-                shift
-                break
-                ;;
-            *)                  # Show usage options
-                echo -e "Invalid option '$1'\n"
-                usage "$1"
-                ;;
-        esac
-        shift
-    done
-else
-    echo
-    usage
-fi
-
-================== TO DELETE AFTER CLEANING (/end) ==================
-
-
 
 #--------------------------------------------------------------------
 # Put a pause in case of regrets
@@ -319,19 +236,16 @@ elif [[ ${#m2list[@]} -gt "1" ]]; then
             single="yes"
             mindisk=1
             #maxdisk=1
-            break
             ;;
         "RAID 0")
             raidtype="0"
             mindisk=2
             #maxdisk=24
-            break
         ;;
         "RAID 1")
             raidtype="1"
             mindisk=2
             #maxdisk="${#m2list[@]}"
-            break
         ;;
         *)
             echo -e "${Red}Invalid raid value!${Off} Try again."
